@@ -48,6 +48,11 @@ def build_config_from_request(form):
         "overlap_ratio_threshold": float(form.get("overlap_ratio_threshold", DEFAULT_CONFIG["overlap_ratio_threshold"])),
         "road_dilate_px": int(form.get("road_dilate_px", DEFAULT_CONFIG["road_dilate_px"])),
         "det_input_size": int(form.get("det_input_size", DEFAULT_CONFIG["det_input_size"])),
+        # TTA config
+        "use_tta": form.get("use_tta", "true").lower() in ("true", "1", "on", "yes"),
+        "tta_flip_h": form.get("tta_flip_h", "true").lower() in ("true", "1", "on", "yes"),
+        "tta_flip_v": form.get("tta_flip_v", "true").lower() in ("true", "1", "on", "yes"),
+        "tta_scales": [1.0],
     }
 
 

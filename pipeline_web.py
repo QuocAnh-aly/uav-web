@@ -22,6 +22,11 @@ DEFAULT_CONFIG = {
         "Clutter", "Building", "Road", "Static_Car",
         "Tree", "Vegetation", "Human", "Moving_Car"
     ],
+    # TTA (Test-Time Augmentation) - matching PaddleSeg aug_pred
+    "use_tta": True,
+    "tta_scales": [1.0],
+    "tta_flip_h": True,
+    "tta_flip_v": True,
 }
 
 
@@ -67,37 +72,183 @@ def create_onnx_session(model_path, use_gpu=True):
 
 
 class SegmentationEngine:
-    def __init__(self, model_path, input_size=(1024, 1024)):
+    """
+    PaddleSeg-compatible ONNX Segmentation Engine.
+
+    Tối ưu hoá matching PaddleSeg predict.py:
+    - Letterbox resize (giữ aspect ratio, padding) thay vì stretch
+    - Test-Time Augmentation (TTA): multi-scale + flip
+    - Normalize khớp PaddleSeg (mean=0.5, std=0.5)
+    - Postprocess đúng: bilinear cho logits, nearest cho argmax mask
+    """
+
+    def __init__(self, model_path, input_size=(1024, 1024),
+                 use_tta=True, tta_scales=None, tta_flip_h=True, tta_flip_v=True):
         self.session = create_onnx_session(model_path)
         self.input_name = self.session.get_inputs()[0].name
-        self.input_size = input_size
+        self.input_size = input_size  # (H, W)
 
-    def preprocess(self, img):
-        img_resized = cv2.resize(img, (self.input_size[1], self.input_size[0]), interpolation=cv2.INTER_LINEAR)
-        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        # Kiểm tra output format (logits hay argmax)
+        output_info = self.session.get_outputs()[0]
+        self.output_dtype = output_info.type
+        self.is_argmax_output = 'int' in self.output_dtype
+
+        # TTA config
+        self.use_tta = use_tta
+        self.tta_scales = tta_scales or [1.0]
+        self.tta_flip_h = tta_flip_h
+        self.tta_flip_v = tta_flip_v
+
+    def _normalize(self, img_rgb):
+        """PaddleSeg Normalize: img/255.0, (img - mean) / std, mean=0.5, std=0.5"""
         img_float = img_rgb.astype(np.float32, copy=False) / 255.0
         img_float -= 0.5
         img_float /= 0.5
-        return np.expand_dims(img_float.transpose((2, 0, 1)), axis=0).astype(np.float32)
+        return img_float
 
-    def postprocess(self, pred, original_shape):
+    def _letterbox_resize(self, img, target_size):
+        """Letterbox resize giữ nguyên tỷ lệ, padding bằng 128."""
+        th, tw = target_size
+        h, w = img.shape[:2]
+        scale = min(tw / w, th / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        img_resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        pad_top = (th - new_h) // 2
+        pad_left = (tw - new_w) // 2
+        canvas = np.full((th, tw, 3), 128, dtype=np.uint8)
+        canvas[pad_top:pad_top + new_h, pad_left:pad_left + new_w] = img_resized
+        return canvas, scale, pad_top, pad_left, new_h, new_w
+
+    def preprocess(self, img):
+        """BGR→RGB → Letterbox resize → Normalize(0.5, 0.5) → CHW → batch"""
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img_padded, scale, pad_top, pad_left, new_h, new_w = self._letterbox_resize(
+            img_rgb, self.input_size)
+        img_float = self._normalize(img_padded)
+        tensor = np.expand_dims(img_float.transpose((2, 0, 1)), axis=0).astype(np.float32)
+        return tensor, scale, pad_top, pad_left, new_h, new_w
+
+    def _unpad_mask(self, mask, pad_top, pad_left, new_h, new_w, orig_h, orig_w):
+        """Loại bỏ padding và resize mask về kích thước gốc (nearest)."""
+        mask_cropped = mask[pad_top:pad_top + new_h, pad_left:pad_left + new_w]
+        return cv2.resize(mask_cropped.astype(np.uint8), (orig_w, orig_h),
+                          interpolation=cv2.INTER_NEAREST)
+
+    def _unpad_logits(self, logits, pad_top, pad_left, new_h, new_w, orig_h, orig_w):
+        """Loại bỏ padding và resize logits bằng bilinear (chất lượng cao)."""
+        num_classes = logits.shape[0]
+        logits_cropped = logits[:, pad_top:pad_top + new_h, pad_left:pad_left + new_w]
+        logits_resized = np.zeros((num_classes, orig_h, orig_w), dtype=np.float32)
+        for c in range(num_classes):
+            logits_resized[c] = cv2.resize(logits_cropped[c], (orig_w, orig_h),
+                                           interpolation=cv2.INTER_LINEAR)
+        return logits_resized
+
+    def _run_single(self, tensor):
+        return self.session.run(None, {self.input_name: tensor})[0]
+
+    def _flip_tensor(self, tensor, flip_h, flip_v):
+        if flip_h:
+            tensor = tensor[:, :, :, ::-1].copy()
+        if flip_v:
+            tensor = tensor[:, :, ::-1, :].copy()
+        return tensor
+
+    def _flip_output(self, output, flip_h, flip_v):
+        output = np.squeeze(output)
+        if output.ndim > 2:
+            if flip_h:
+                output = output[:, :, ::-1].copy()
+            if flip_v:
+                output = output[:, ::-1, :].copy()
+        else:
+            if flip_h:
+                output = output[:, ::-1].copy()
+            if flip_v:
+                output = output[::-1, :].copy()
+        return output
+
+    def postprocess(self, pred, pad_info, original_shape):
+        """Unpad + resize: bilinear cho logits, nearest cho argmax mask."""
+        scale, pad_top, pad_left, new_h, new_w = pad_info
+        h_orig, w_orig = original_shape
         pred = np.squeeze(pred)
         if pred.ndim > 2:
-            num_classes = pred.shape[0]
-            h_orig, w_orig = original_shape
-            logits_resized = np.zeros((num_classes, h_orig, w_orig), dtype=np.float32)
-            for c in range(num_classes):
-                logits_resized[c] = cv2.resize(pred[c], (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+            logits_resized = self._unpad_logits(
+                pred, pad_top, pad_left, new_h, new_w, h_orig, w_orig)
             mask = np.argmax(logits_resized, axis=0).astype(np.uint8)
         else:
-            mask = cv2.resize(pred.astype(np.uint8), (original_shape[1], original_shape[0]), interpolation=cv2.INTER_NEAREST)
+            mask = self._unpad_mask(pred, pad_top, pad_left, new_h, new_w, h_orig, w_orig)
         return mask
 
+    def _get_flip_combinations(self):
+        combos = [(False, False)]
+        if self.tta_flip_h:
+            combos.append((True, False))
+        if self.tta_flip_v:
+            combos.append((False, True))
+            if self.tta_flip_h:
+                combos.append((True, True))
+        return combos
+
     def infer(self, frame):
+        """Inference với TTA matching PaddleSeg aug_inference."""
         h, w = frame.shape[:2]
-        input_tensor = self.preprocess(frame)
-        outputs = self.session.run(None, {self.input_name: input_tensor})
-        return self.postprocess(outputs[0], (h, w))
+
+        if not self.use_tta or (len(self.tta_scales) == 1 and self.tta_scales[0] == 1.0
+                                 and not self.tta_flip_h and not self.tta_flip_v):
+            tensor, scale, pad_top, pad_left, new_h, new_w = self.preprocess(frame)
+            output = self._run_single(tensor)
+            return self.postprocess(output, (scale, pad_top, pad_left, new_h, new_w), (h, w))
+
+        flip_combos = self._get_flip_combinations()
+        if self.is_argmax_output:
+            return self._tta_majority_voting(frame, flip_combos)
+        else:
+            return self._tta_logits_averaging(frame, flip_combos)
+
+    def _tta_majority_voting(self, frame, flip_combos):
+        h, w = frame.shape[:2]
+        num_classes = 8
+        vote_map = np.zeros((num_classes, h, w), dtype=np.float32)
+        for scale in self.tta_scales:
+            scaled_size = (int(self.input_size[0] * scale), int(self.input_size[1] * scale))
+            for flip_h, flip_v in flip_combos:
+                img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img_padded, s, pt, pl, nh, nw = self._letterbox_resize(img_rgb, scaled_size)
+                img_float = self._normalize(img_padded)
+                tensor = np.expand_dims(img_float.transpose((2, 0, 1)), axis=0).astype(np.float32)
+                tensor = self._flip_tensor(tensor, flip_h, flip_v)
+                output = self._run_single(tensor)
+                output = self._flip_output(output, flip_h, flip_v)
+                mask = self._unpad_mask(output, pt, pl, nh, nw, h, w)
+                for c in range(num_classes):
+                    vote_map[c] += (mask == c).astype(np.float32)
+        return np.argmax(vote_map, axis=0).astype(np.uint8)
+
+    def _tta_logits_averaging(self, frame, flip_combos):
+        h, w = frame.shape[:2]
+        accumulated_logits = None
+        count = 0
+        for scale in self.tta_scales:
+            scaled_size = (int(self.input_size[0] * scale), int(self.input_size[1] * scale))
+            for flip_h, flip_v in flip_combos:
+                img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img_padded, s, pt, pl, nh, nw = self._letterbox_resize(img_rgb, scaled_size)
+                img_float = self._normalize(img_padded)
+                tensor = np.expand_dims(img_float.transpose((2, 0, 1)), axis=0).astype(np.float32)
+                tensor = self._flip_tensor(tensor, flip_h, flip_v)
+                output = self._run_single(tensor)
+                output = np.squeeze(output)
+                output = self._flip_output(output, flip_h, flip_v)
+                logits_resized = self._unpad_logits(output, pt, pl, nh, nw, h, w)
+                if accumulated_logits is None:
+                    accumulated_logits = logits_resized
+                else:
+                    accumulated_logits += logits_resized
+                count += 1
+        accumulated_logits /= count
+        return np.argmax(accumulated_logits, axis=0).astype(np.uint8)
 
 
 class DetectionEngine:
@@ -254,7 +405,14 @@ class MetricsTracker:
 class LanePersonPipeline:
     def __init__(self, seg_model_path, det_model_path, config=None):
         self.config = {**DEFAULT_CONFIG, **(config or {})}
-        self.seg_engine = SegmentationEngine(seg_model_path, input_size=self.config["seg_input_size"])
+        self.seg_engine = SegmentationEngine(
+            seg_model_path,
+            input_size=self.config["seg_input_size"],
+            use_tta=self.config.get("use_tta", True),
+            tta_scales=self.config.get("tta_scales", [1.0]),
+            tta_flip_h=self.config.get("tta_flip_h", True),
+            tta_flip_v=self.config.get("tta_flip_v", True),
+        )
         self.det_engine = DetectionEngine(
             det_model_path,
             input_size=self.config["det_input_size"],

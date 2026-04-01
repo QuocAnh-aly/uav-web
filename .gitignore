@@ -1,0 +1,9 @@
+data/
+detection.onnx
+seg/
+# Chặn toàn bộ video
+*.mp4
+venv/
+# Hoặc tên thư mục venv của bạn
+.venv/
+__pycache__/

@@ -1,0 +1,22 @@
+{
+  "total_frames": 1,
+  "wall_time_sec": 1.05,
+  "avg_fps": 0.95,
+  "avg_seg_ms": 244.3,
+  "avg_det_ms": 797.4,
+  "avg_pipeline_ms": 1041.7,
+  "min_fps": 0.96,
+  "max_fps": 0.96,
+  "total_persons_detected": 95,
+  "total_on_road_events": 0,
+  "alert_frames": 0,
+  "alert_ratio": 0.0,
+  "single_frame": {
+    "num_persons": 95,
+    "num_on_road": 0,
+    "alert": false,
+    "t_seg": 0.24428200721740723,
+    "t_det": 0.7974352836608887,
+    "t_total": 1.041717290878296
+  }
+}

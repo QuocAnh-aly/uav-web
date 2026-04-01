@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lane Intrusion Detection Web App</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+    <div class="page">
+        <header class="hero">
+            <div>
+                <p class="eyebrow">Lane + Person Detection</p>
+                <h1>Web app phát hiện người xâm nhập làn đường</h1>
+                <p class="subtitle">
+                    Tải ảnh hoặc video lên, hệ thống sẽ chạy segmentation + detection,
+                    hiển thị kết quả trực quan ở khung bên phải và cho phép tải output về ngay.
+                </p>
+            </div>
+            <div class="hero-badge">Upload ảnh / video • Xử lý • Xem kết quả • Tải về</div>
+        </header>
+
+        <main class="layout">
+            <section class="card form-card">
+                <h2>Cấu hình xử lý</h2>
+                <form id="process-form">
+                    <label class="file-drop" for="media-input">
+                        <input id="media-input" name="media" type="file" accept="image/*,video/*" required />
+                        <span class="file-title">Bấm để chọn ảnh hoặc video</span>
+                        <span class="file-hint">Hỗ trợ: JPG, PNG, WEBP, MP4, AVI, MOV, MKV...</span>
+                    </label>
+
+                    <div class="selected-file" id="selected-file">Chưa chọn file</div>
+
+                    <div class="grid-2">
+                        <div>
+                            <label>Segmentation model</label>
+                            <input type="text" name="seg_model" value="seg/modelseg.onnx" />
+                        </div>
+                        <div>
+                            <label>Detection model</label>
+                            <input type="text" name="det_model" value="detection.onnx" />
+                        </div>
+                    </div>
+
+                    <div class="grid-3">
+                        <div>
+                            <label>Det conf threshold</label>
+                            <input type="number" name="det_conf_threshold" step="0.01" min="0" max="1" value="{{ defaults.det_conf_threshold }}" />
+                        </div>
+                        <div>
+                            <label>Det IoU threshold</label>
+                            <input type="number" name="det_iou_threshold" step="0.01" min="0" max="1" value="{{ defaults.det_iou_threshold }}" />
+                        </div>
+                        <div>
+                            <label>Overlap threshold</label>
+                            <input type="number" name="overlap_ratio_threshold" step="0.01" min="0" max="1" value="{{ defaults.overlap_ratio_threshold }}" />
+                        </div>
+                    </div>
+
+                    <div class="grid-3">
+                        <div>
+                            <label>Road class ID</label>
+                            <input type="number" name="road_class_id" value="{{ defaults.road_class_id }}" />
+                        </div>
+                        <div>
+                            <label>Person seg class ID</label>
+                            <input type="number" name="person_seg_class_id" value="{{ defaults.person_seg_class_id }}" />
+                        </div>
+                        <div>
+                            <label>Road dilate px</label>
+                            <input type="number" name="road_dilate_px" value="{{ defaults.road_dilate_px }}" />
+                        </div>
+                    </div>
+
+                    <div class="grid-1">
+                        <div>
+                            <label>Detection input size</label>
+                            <input type="number" name="det_input_size" value="{{ defaults.det_input_size }}" />
+                        </div>
+                    </div>
+
+                    <button type="submit" id="submit-btn">Chạy nhận diện</button>
+                    <div class="status" id="status">Sẵn sàng.</div>
+                </form>
+            </section>
+
+            <section class="card preview-card">
+                <div class="preview-header">
+                    <h2>Kết quả trực quan</h2>
+                    <div class="action-row" id="action-row"></div>
+                </div>
+
+                <div class="preview-grid">
+                    <div class="preview-pane">
+                        <h3>Input</h3>
+                        <div class="media-box" id="original-box">
+                            <div class="placeholder">Ảnh/video gốc sẽ hiển thị ở đây</div>
+                        </div>
+                    </div>
+                    <div class="preview-pane">
+                        <h3>Output</h3>
+                        <div class="media-box" id="result-box">
+                            <div class="placeholder">Kết quả sau xử lý sẽ hiển thị ở đây</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="metrics" id="metrics-panel">
+                    <h3>Metrics</h3>
+                    <div class="placeholder">Chưa có dữ liệu</div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
